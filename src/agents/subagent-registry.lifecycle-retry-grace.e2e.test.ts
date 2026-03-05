@@ -218,7 +218,7 @@ describe("subagent registry lifecycle error grace", () => {
     expect(captureCompletionReplySpy).toHaveBeenCalledTimes(1);
   });
 
-  it("caps frozen completion output and retains it for keep-mode cleanup", async () => {
+  it("regression, captures frozen completion output with 100KB cap and retains it for keep-mode cleanup", async () => {
     registerCompletionRun("run-capped", "capped", "capped result test");
     captureCompletionReplySpy.mockResolvedValueOnce("x".repeat(120 * 1024));
     announceSpy.mockResolvedValueOnce(true);

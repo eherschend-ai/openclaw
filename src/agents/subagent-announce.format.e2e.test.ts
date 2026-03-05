@@ -1227,7 +1227,7 @@ describe("subagent announce formatting", () => {
     expect(params.accountId).toBe("kev");
   });
 
-  it("does not report cron announce as delivered when it was only queued", async () => {
+  it("reports cron announce as delivered when it successfully queues into an active requester run", async () => {
     embeddedRunMock.isEmbeddedPiRunActive.mockReturnValue(true);
     embeddedRunMock.isEmbeddedPiRunStreaming.mockReturnValue(false);
     sessionStore = {
@@ -1249,7 +1249,7 @@ describe("subagent announce formatting", () => {
       ...defaultOutcomeAnnounce,
     });
 
-    expect(didAnnounce).toBe(false);
+    expect(didAnnounce).toBe(true);
     expect(agentSpy).toHaveBeenCalledTimes(1);
   });
 

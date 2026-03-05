@@ -106,17 +106,6 @@ function capFrozenResultText(resultText: string): string {
   return `${payload}${notice}`;
 }
 
-function clearFrozenRunResult(entry: SubagentRunRecord): boolean {
-  const hadFrozenResult = entry.frozenResultText !== undefined;
-  const hadCapturedAt = entry.frozenResultCapturedAt !== undefined;
-  if (!hadFrozenResult && !hadCapturedAt) {
-    return false;
-  }
-  entry.frozenResultText = undefined;
-  entry.frozenResultCapturedAt = undefined;
-  return true;
-}
-
 function resolveAnnounceRetryDelayMs(retryCount: number) {
   const boundedRetryCount = Math.max(0, Math.min(retryCount, 10));
   // retryCount is "attempts already made", so retry #1 waits 1s, then 2s, 4s...
@@ -764,12 +753,9 @@ async function finalizeSubagentCleanup(
     if (shouldDeleteAttachments) {
       await safeRemoveAttachmentsDir(entry);
     }
-    // Keep-mode runs must retain frozen completion text so ancestor wake/recheck
-    // flows can still synthesize descendant results after child cleanup completes.
-    // Delete-mode runs are removed immediately, so frozen payload retention there
-    // has no behavioral impact.
     if (cleanup === "delete") {
-      clearFrozenRunResult(entry);
+      entry.frozenResultText = undefined;
+      entry.frozenResultCapturedAt = undefined;
     }
     completeCleanupBookkeeping({
       runId,

@@ -51,42 +51,13 @@ export function listRunsForRequesterFromRuns(
   });
 }
 
-export function resolveRequesterForChildSessionFromRuns(
+function findLatestRunForChildSession(
   runs: Map<string, SubagentRunRecord>,
   childSessionKey: string,
-): {
-  requesterSessionKey: string;
-  requesterOrigin?: DeliveryContext;
-} | null {
+): SubagentRunRecord | undefined {
   const key = childSessionKey.trim();
   if (!key) {
-    return null;
-  }
-  let best: SubagentRunRecord | undefined;
-  for (const entry of runs.values()) {
-    if (entry.childSessionKey !== key) {
-      continue;
-    }
-    if (!best || entry.createdAt > best.createdAt) {
-      best = entry;
-    }
-  }
-  if (!best) {
-    return null;
-  }
-  return {
-    requesterSessionKey: best.requesterSessionKey,
-    requesterOrigin: best.requesterOrigin,
-  };
-}
-
-export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
-  runs: Map<string, SubagentRunRecord>,
-  childSessionKey: string,
-): boolean {
-  const key = childSessionKey.trim();
-  if (!key) {
-    return false;
+    return undefined;
   }
   let latest: SubagentRunRecord | undefined;
   for (const entry of runs.values()) {
@@ -97,19 +68,37 @@ export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
       latest = entry;
     }
   }
+  return latest;
+}
+
+export function resolveRequesterForChildSessionFromRuns(
+  runs: Map<string, SubagentRunRecord>,
+  childSessionKey: string,
+): {
+  requesterSessionKey: string;
+  requesterOrigin?: DeliveryContext;
+} | null {
+  const latest = findLatestRunForChildSession(runs, childSessionKey);
   if (!latest) {
-    return false;
+    return null;
   }
-  // Session-mode subagents remain available for follow-up turns.
-  if (latest.spawnMode === "session") {
-    return false;
-  }
-  // Run-mode sessions should only ignore late descendant completion traffic
-  // once the run has fully completed its own cleanup/announce flow.
-  return (
+  return {
+    requesterSessionKey: latest.requesterSessionKey,
+    requesterOrigin: latest.requesterOrigin,
+  };
+}
+
+export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
+  runs: Map<string, SubagentRunRecord>,
+  childSessionKey: string,
+): boolean {
+  const latest = findLatestRunForChildSession(runs, childSessionKey);
+  return Boolean(
+    latest &&
+    latest.spawnMode !== "session" &&
     typeof latest.endedAt === "number" &&
     typeof latest.cleanupCompletedAt === "number" &&
-    latest.cleanupCompletedAt >= latest.endedAt
+    latest.cleanupCompletedAt >= latest.endedAt,
   );
 }
 

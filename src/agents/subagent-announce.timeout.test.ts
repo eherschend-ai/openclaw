@@ -18,6 +18,7 @@ let configOverride: ReturnType<(typeof import("../config/config.js"))["loadConfi
 let requesterDepthResolver: (sessionKey?: string) => number = () => 0;
 let subagentSessionRunActive = true;
 let shouldIgnorePostCompletion = false;
+let pendingDescendantRuns = 0;
 let fallbackRequesterResolution: {
   requesterSessionKey: string;
   requesterOrigin?: { channel?: string; to?: string; accountId?: string };
@@ -60,7 +61,7 @@ vi.mock("./pi-embedded.js", () => ({
 
 vi.mock("./subagent-registry.js", () => ({
   countActiveDescendantRuns: () => 0,
-  countPendingDescendantRuns: () => 0,
+  countPendingDescendantRuns: () => pendingDescendantRuns,
   listSubagentRunsForRequester: () => [],
   isSubagentSessionRunActive: () => subagentSessionRunActive,
   shouldIgnorePostCompletionAnnounceForSession: () => shouldIgnorePostCompletion,
@@ -104,8 +105,8 @@ function setConfiguredAnnounceTimeout(timeoutMs: number): void {
 async function runAnnounceFlowForTest(
   childRunId: string,
   overrides: Partial<AnnounceFlowParams> = {},
-): Promise<void> {
-  await runSubagentAnnounceFlow({
+): Promise<boolean> {
+  return await runSubagentAnnounceFlow({
     ...baseAnnounceFlowParams,
     childRunId,
     ...overrides,
@@ -126,6 +127,7 @@ describe("subagent announce timeout config", () => {
     requesterDepthResolver = () => 0;
     subagentSessionRunActive = true;
     shouldIgnorePostCompletion = false;
+    pendingDescendantRuns = 0;
     fallbackRequesterResolution = null;
   });
 
@@ -164,7 +166,38 @@ describe("subagent announce timeout config", () => {
     expect(completionDirectAgentCall?.timeoutMs).toBe(90_000);
   });
 
-  it("routes child announce back to ended parent subagent session when parent session still exists", async () => {
+  it("regression, skips parent announce while descendants are still pending", async () => {
+    requesterDepthResolver = () => 1;
+    pendingDescendantRuns = 2;
+
+    const didAnnounce = await runAnnounceFlowForTest("run-pending-descendants", {
+      requesterSessionKey: "agent:main:subagent:parent",
+      requesterDisplayKey: "agent:main:subagent:parent",
+    });
+
+    expect(didAnnounce).toBe(false);
+    expect(
+      findGatewayCall((call) => call.method === "agent" && call.expectFinal === true),
+    ).toBeUndefined();
+  });
+
+  it("regression, supports cron announceType without declaration order errors", async () => {
+    const didAnnounce = await runAnnounceFlowForTest("run-announce-type", {
+      announceType: "cron job",
+      expectsCompletionMessage: true,
+      requesterOrigin: { channel: "discord", to: "channel:cron" },
+    });
+
+    expect(didAnnounce).toBe(true);
+    const directAgentCall = findGatewayCall(
+      (call) => call.method === "agent" && call.expectFinal === true,
+    );
+    const internalEvents =
+      (directAgentCall?.params?.internalEvents as Array<{ announceType?: string }>) ?? [];
+    expect(internalEvents[0]?.announceType).toBe("cron job");
+  });
+
+  it("regression, routes child announce to parent session instead of grandparent when parent session still exists", async () => {
     const parentSessionKey = "agent:main:subagent:parent";
     requesterDepthResolver = (sessionKey?: string) =>
       sessionKey === parentSessionKey ? 1 : sessionKey?.includes(":subagent:") ? 1 : 0;
@@ -190,7 +223,7 @@ describe("subagent announce timeout config", () => {
     expect(directAgentCall?.params?.deliver).toBe(false);
   });
 
-  it("falls back to grandparent only when ended parent subagent session is missing", async () => {
+  it("regression, falls back to grandparent only when parent subagent session is missing", async () => {
     const parentSessionKey = "agent:main:subagent:parent-missing";
     requesterDepthResolver = (sessionKey?: string) =>
       sessionKey === parentSessionKey ? 1 : sessionKey?.includes(":subagent:") ? 1 : 0;

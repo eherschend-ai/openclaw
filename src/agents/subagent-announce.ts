@@ -512,31 +512,20 @@ async function resolveSubagentCompletionOrigin(params: {
   childRunId?: string;
   spawnMode?: SpawnSubagentMode;
   expectsCompletionMessage: boolean;
-}): Promise<{
-  origin?: DeliveryContext;
-  routeMode: "bound" | "fallback" | "hook";
-}> {
+}): Promise<DeliveryContext | undefined> {
   const requesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
-  const requesterConversation = (() => {
-    const channel = requesterOrigin?.channel?.trim().toLowerCase();
-    const to = requesterOrigin?.to?.trim();
-    const accountId = normalizeAccountId(requesterOrigin?.accountId);
-    const threadId =
-      requesterOrigin?.threadId != null && requesterOrigin.threadId !== ""
-        ? String(requesterOrigin.threadId).trim()
-        : undefined;
-    const conversationId =
-      threadId || (to?.startsWith("channel:") ? to.slice("channel:".length) : "");
-    if (!channel || !conversationId) {
-      return undefined;
-    }
-    const ref: ConversationRef = {
-      channel,
-      accountId,
-      conversationId,
-    };
-    return ref;
-  })();
+  const channel = requesterOrigin?.channel?.trim().toLowerCase();
+  const to = requesterOrigin?.to?.trim();
+  const accountId = normalizeAccountId(requesterOrigin?.accountId);
+  const threadId =
+    requesterOrigin?.threadId != null && requesterOrigin.threadId !== ""
+      ? String(requesterOrigin.threadId).trim()
+      : undefined;
+  const conversationId =
+    threadId || (to?.startsWith("channel:") ? to.slice("channel:".length) : "");
+  const requesterConversation: ConversationRef | undefined =
+    channel && conversationId ? { channel, accountId, conversationId } : undefined;
+
   const route = createBoundDeliveryRouter().resolveDestination({
     eventKind: "task_completion",
     targetSessionKey: params.childSessionKey,
@@ -544,32 +533,23 @@ async function resolveSubagentCompletionOrigin(params: {
     failClosed: false,
   });
   if (route.mode === "bound" && route.binding) {
-    const boundOrigin: DeliveryContext = {
-      channel: route.binding.conversation.channel,
-      accountId: route.binding.conversation.accountId,
-      to: `channel:${route.binding.conversation.conversationId}`,
-      // `conversationId` identifies the target conversation (channel/DM/thread),
-      // but it is not always a thread identifier. Passing it as `threadId` breaks
-      // Slack DM/top-level delivery by forcing an invalid thread_ts. Preserve only
-      // explicit requester thread hints for channels that actually use threading.
-      threadId:
-        requesterOrigin?.threadId != null && requesterOrigin.threadId !== ""
-          ? String(requesterOrigin.threadId)
-          : undefined,
-    };
-    return {
-      // Bound target is authoritative; requester hints fill only missing fields.
-      origin: mergeDeliveryContext(boundOrigin, requesterOrigin),
-      routeMode: "bound",
-    };
+    return mergeDeliveryContext(
+      {
+        channel: route.binding.conversation.channel,
+        accountId: route.binding.conversation.accountId,
+        to: `channel:${route.binding.conversation.conversationId}`,
+        threadId:
+          requesterOrigin?.threadId != null && requesterOrigin.threadId !== ""
+            ? String(requesterOrigin.threadId)
+            : undefined,
+      },
+      requesterOrigin,
+    );
   }
 
   const hookRunner = getGlobalHookRunner();
   if (!hookRunner?.hasHooks("subagent_delivery_target")) {
-    return {
-      origin: requesterOrigin,
-      routeMode: "fallback",
-    };
+    return requesterOrigin;
   }
   try {
     const result = await hookRunner.runSubagentDeliveryTarget(
@@ -588,28 +568,12 @@ async function resolveSubagentCompletionOrigin(params: {
       },
     );
     const hookOrigin = normalizeDeliveryContext(result?.origin);
-    if (!hookOrigin) {
-      return {
-        origin: requesterOrigin,
-        routeMode: "fallback",
-      };
+    if (!hookOrigin || (hookOrigin.channel && !isDeliverableMessageChannel(hookOrigin.channel))) {
+      return requesterOrigin;
     }
-    if (hookOrigin.channel && !isDeliverableMessageChannel(hookOrigin.channel)) {
-      return {
-        origin: requesterOrigin,
-        routeMode: "fallback",
-      };
-    }
-    // Hook-provided origin should override requester defaults when present.
-    return {
-      origin: mergeDeliveryContext(hookOrigin, requesterOrigin),
-      routeMode: "hook",
-    };
+    return mergeDeliveryContext(hookOrigin, requesterOrigin);
   } catch {
-    return {
-      origin: requesterOrigin,
-      routeMode: "fallback",
-    };
+    return requesterOrigin;
   }
 }
 
@@ -621,8 +585,6 @@ async function sendAnnounce(item: AnnounceQueueItem) {
   const origin = item.origin;
   const threadId =
     origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
-  // Share one announce identity across direct and queued delivery paths so
-  // gateway dedupe suppresses true retries without collapsing distinct events.
   const idempotencyKey = buildAnnounceIdempotencyKey(
     resolveQueueAnnounceId({
       announceId: item.announceId,
@@ -767,10 +729,7 @@ async function sendSubagentAnnounceDirectly(params: {
   internalEvents?: AgentInternalEvent[];
   expectsCompletionMessage: boolean;
   bestEffortDeliver?: boolean;
-  completionRouteMode?: "bound" | "fallback" | "hook";
-  spawnMode?: SpawnSubagentMode;
   directIdempotencyKey: string;
-  currentRunId?: string;
   completionDirectOrigin?: DeliveryContext;
   directOrigin?: DeliveryContext;
   sourceSessionKey?: string;
@@ -808,7 +767,7 @@ async function sendSubagentAnnounceDirectly(params: {
       typeof effectiveDirectOrigin?.to === "string" ? effectiveDirectOrigin.to.trim() : "";
     const hasDeliverableDirectTarget =
       !params.requesterIsSubagent && Boolean(directChannel) && Boolean(directTo);
-    let shouldDeliverExternally =
+    const shouldDeliverExternally =
       !params.requesterIsSubagent &&
       (!params.expectsCompletionMessage || hasDeliverableDirectTarget);
 
@@ -883,10 +842,7 @@ async function deliverSubagentAnnouncement(params: {
   requesterIsSubagent: boolean;
   expectsCompletionMessage: boolean;
   bestEffortDeliver?: boolean;
-  completionRouteMode?: "bound" | "fallback" | "hook";
-  spawnMode?: SpawnSubagentMode;
   directIdempotencyKey: string;
-  currentRunId?: string;
   signal?: AbortSignal;
 }): Promise<SubagentAnnounceDeliveryResult> {
   return await runSubagentAnnounceDispatch({
@@ -912,10 +868,7 @@ async function deliverSubagentAnnouncement(params: {
         triggerMessage: params.triggerMessage,
         internalEvents: params.internalEvents,
         directIdempotencyKey: params.directIdempotencyKey,
-        currentRunId: params.currentRunId,
         completionDirectOrigin: params.completionDirectOrigin,
-        completionRouteMode: params.completionRouteMode,
-        spawnMode: params.spawnMode,
         directOrigin: params.directOrigin,
         sourceSessionKey: params.sourceSessionKey,
         sourceChannel: params.sourceChannel,
@@ -1068,11 +1021,10 @@ function buildAnnounceReplyInstruction(params: {
 }
 
 function buildAnnounceSteerMessage(events: AgentInternalEvent[]): string {
-  const rendered = formatAgentInternalEventsForPrompt(events);
-  if (!rendered) {
-    return "A background task finished. Process the completion update now.";
-  }
-  return rendered;
+  return (
+    formatAgentInternalEventsForPrompt(events) ||
+    "A background task finished. Process the completion update now."
+  );
 }
 
 function hasUsableSessionEntry(entry: unknown): boolean {
@@ -1080,10 +1032,7 @@ function hasUsableSessionEntry(entry: unknown): boolean {
     return false;
   }
   const sessionId = (entry as { sessionId?: unknown }).sessionId;
-  if (typeof sessionId === "string" && sessionId.trim() === "") {
-    return false;
-  }
-  return true;
+  return typeof sessionId !== "string" || sessionId.trim() !== "";
 }
 
 function buildDescendantWakeMessage(params: { findings: string; taskLabel: string }): string {
@@ -1203,6 +1152,7 @@ export async function runSubagentAnnounceFlow(params: {
 }): Promise<boolean> {
   let didAnnounce = false;
   const expectsCompletionMessage = params.expectsCompletionMessage === true;
+  const announceType = params.announceType ?? "subagent task";
   let shouldDeleteChildSession = params.cleanup === "delete";
   try {
     let targetRequesterSessionKey = params.requesterSessionKey;
@@ -1216,14 +1166,9 @@ export async function runSubagentAnnounceFlow(params: {
     const settleTimeoutMs = Math.min(Math.max(params.timeoutMs, 1), 120_000);
     let reply = params.roundOneReply;
     let outcome: SubagentRunOutcome | undefined = params.outcome;
-    // Lifecycle "end" can arrive before auto-compaction retries finish. If the
-    // subagent is still active, wait for the embedded run to fully settle.
     if (childSessionId && isEmbeddedPiRunActive(childSessionId)) {
       const settled = await waitForEmbeddedPiRunEnd(childSessionId, settleTimeoutMs);
       if (!settled && isEmbeddedPiRunActive(childSessionId)) {
-        // The child run is still active (e.g., compaction retry still in progress).
-        // Defer announcement so we don't report stale/partial output.
-        // Keep the child session so output is not lost while the run is still active.
         shouldDeleteChildSession = false;
         return false;
       }
@@ -1258,11 +1203,6 @@ export async function runSubagentAnnounceFlow(params: {
       if (typeof wait?.endedAt === "number" && !params.endedAt) {
         params.endedAt = wait.endedAt;
       }
-      if (wait?.status === "timeout") {
-        if (!outcome) {
-          outcome = { status: "timeout" };
-        }
-      }
     }
 
     if (!outcome) {
@@ -1271,7 +1211,6 @@ export async function runSubagentAnnounceFlow(params: {
 
     let requesterDepth = getSubagentDepthFromSessionStore(targetRequesterSessionKey);
 
-    let pendingChildDescendantRuns = 0;
     let childCompletionFindings: string | undefined;
     let subagentRegistryRuntime:
       | Awaited<ReturnType<typeof loadSubagentRegistryRuntime>>
@@ -1287,14 +1226,11 @@ export async function runSubagentAnnounceFlow(params: {
         return true;
       }
 
-      pendingChildDescendantRuns = Math.max(
+      const pendingChildDescendantRuns = Math.max(
         0,
         subagentRegistryRuntime.countPendingDescendantRuns(params.childSessionKey),
       );
-      if (pendingChildDescendantRuns > 0) {
-        // Deterministic nested announce policy: if this run still has unfinished
-        // descendants, do not announce yet. Wait for descendant cleanup retries
-        // to re-trigger this announce check once everything is complete.
+      if (pendingChildDescendantRuns > 0 && announceType !== "cron job") {
         shouldDeleteChildSession = false;
         return false;
       }
@@ -1307,21 +1243,11 @@ export async function runSubagentAnnounceFlow(params: {
           },
         );
         if (Array.isArray(directChildren) && directChildren.length > 0) {
-          childCompletionFindings = buildChildCompletionFindings(
-            directChildren.map((child) => ({
-              childSessionKey: child.childSessionKey,
-              task: child.task,
-              label: child.label,
-              createdAt: child.createdAt,
-              endedAt: child.endedAt,
-              frozenResultText: child.frozenResultText,
-              outcome: child.outcome,
-            })),
-          );
+          childCompletionFindings = buildChildCompletionFindings(directChildren);
         }
       }
     } catch {
-      // Best-effort only; fall back to current-run reply extraction.
+      // Best-effort only.
     }
 
     const announceId = buildAnnounceIdFromChildRun({
@@ -1371,7 +1297,6 @@ export async function runSubagentAnnounceFlow(params: {
         childSessionId &&
         isEmbeddedPiRunActive(childSessionId)
       ) {
-        // Avoid announcing "(no output)" while the child run is still producing output.
         shouldDeleteChildSession = false;
         return false;
       }
@@ -1394,21 +1319,11 @@ export async function runSubagentAnnounceFlow(params: {
             ? `failed: ${outcome.error || "unknown error"}`
             : "finished with unknown status";
 
-    // Build instructional message for main agent
-    const announceType = params.announceType ?? "subagent task";
     const taskLabel = params.label || params.task || "task";
     const announceSessionId = childSessionId || "unknown";
     const findings = childCompletionFindings || reply || "(no output)";
-    let triggerMessage = "";
-    let steerMessage = "";
-    let internalEvents: AgentInternalEvent[] = [];
 
     let requesterIsSubagent = requesterDepth >= 1;
-    // If the requester subagent has already finished, bubble the announce to its
-    // requester (typically main) so descendant completion is not silently lost.
-    // BUT: only fallback if the parent SESSION is deleted, not just if the current
-    // run ended. A parent waiting for child results has no active run but should
-    // still receive the announce — injecting will start a new agent turn.
     if (requesterIsSubagent) {
       const {
         isSubagentSessionRunActive,
@@ -1419,18 +1334,12 @@ export async function runSubagentAnnounceFlow(params: {
         if (shouldIgnorePostCompletionAnnounceForSession(targetRequesterSessionKey)) {
           return true;
         }
-        // Parent run has ended. Check if parent SESSION still exists.
-        // If it does, the parent may be waiting for child results — inject there.
         const parentSessionEntry = loadSessionEntryByKey(targetRequesterSessionKey);
         const parentSessionAlive = hasUsableSessionEntry(parentSessionEntry);
 
         if (!parentSessionAlive) {
-          // Parent session is truly gone — fallback to grandparent
           const fallback = resolveRequesterForChildSession(targetRequesterSessionKey);
           if (!fallback?.requesterSessionKey) {
-            // Without a requester fallback we cannot safely deliver this nested
-            // completion. Keep cleanup retryable so a later registry restore can
-            // recover and re-announce instead of silently dropping the result.
             shouldDeleteChildSession = false;
             return false;
           }
@@ -1440,8 +1349,6 @@ export async function runSubagentAnnounceFlow(params: {
           requesterDepth = getSubagentDepthFromSessionStore(targetRequesterSessionKey);
           requesterIsSubagent = requesterDepth >= 1;
         }
-        // If parent session is alive (just has no active run), continue with parent
-        // as target. Injecting the announce will start a new agent turn for processing.
       }
     }
 
@@ -1455,7 +1362,7 @@ export async function runSubagentAnnounceFlow(params: {
       startedAt: params.startedAt,
       endedAt: params.endedAt,
     });
-    internalEvents = [
+    const internalEvents: AgentInternalEvent[] = [
       {
         type: "task_completion",
         source: announceType === "cron job" ? "cron" : "subagent",
@@ -1470,8 +1377,7 @@ export async function runSubagentAnnounceFlow(params: {
         replyInstruction,
       },
     ];
-    triggerMessage = buildAnnounceSteerMessage(internalEvents);
-    steerMessage = triggerMessage;
+    const triggerMessage = buildAnnounceSteerMessage(internalEvents);
 
     // Send to the requester session. For nested subagents this is an internal
     // follow-up injection (deliver=false) so the orchestrator receives it.
@@ -1480,7 +1386,7 @@ export async function runSubagentAnnounceFlow(params: {
       const { entry } = loadRequesterSessionEntry(targetRequesterSessionKey);
       directOrigin = resolveAnnounceOrigin(entry, targetRequesterOrigin);
     }
-    const completionResolution =
+    const completionDirectOrigin =
       expectsCompletionMessage && !requesterIsSubagent
         ? await resolveSubagentCompletionOrigin({
             childSessionKey: params.childSessionKey,
@@ -1490,20 +1396,13 @@ export async function runSubagentAnnounceFlow(params: {
             spawnMode: params.spawnMode,
             expectsCompletionMessage,
           })
-        : {
-            origin: targetRequesterOrigin,
-            routeMode: "fallback" as const,
-          };
-    const completionDirectOrigin = completionResolution.origin;
-    // Use a deterministic idempotency key so the gateway dedup cache
-    // catches duplicates if this announce is also queued by the gateway-
-    // level message queue while the main session is busy (#17122).
+        : targetRequesterOrigin;
     const directIdempotencyKey = buildAnnounceIdempotencyKey(announceId);
     const delivery = await deliverSubagentAnnouncement({
       requesterSessionKey: targetRequesterSessionKey,
       announceId,
       triggerMessage,
-      steerMessage,
+      steerMessage: triggerMessage,
       internalEvents,
       summaryLine: taskLabel,
       requesterOrigin:
@@ -1519,19 +1418,9 @@ export async function runSubagentAnnounceFlow(params: {
       requesterIsSubagent,
       expectsCompletionMessage: expectsCompletionMessage,
       bestEffortDeliver: params.bestEffortDeliver,
-      completionRouteMode: completionResolution.routeMode,
-      spawnMode: params.spawnMode,
       directIdempotencyKey,
-      currentRunId: params.childRunId,
       signal: params.signal,
     });
-    // Trust delivery.delivered for all paths including queue/steer.
-    // When path is "steered" or "queued", delivery.delivered=true means the
-    // message reached an active session — this is a confirmed delivery.
-    // The previous cron-specific override that forced didAnnounce=false for
-    // queue/steer was too aggressive: it suppressed valid deliveries when the
-    // fallback queue path successfully reached the user (e.g. session was busy
-    // processing at announce time, so direct failed and steer succeeded).
     didAnnounce = delivery.delivered;
     if (!delivery.delivered && delivery.path === "direct" && delivery.error) {
       defaultRuntime.error?.(

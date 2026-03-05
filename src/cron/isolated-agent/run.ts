@@ -24,6 +24,10 @@ import {
   resolveThinkingDefault,
 } from "../../agents/model-selection.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
+import {
+  countActiveDescendantRuns,
+  listDescendantRunsForRequester,
+} from "../../agents/subagent-registry.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import { deriveSessionTotalTokens, hasNonzeroUsage } from "../../agents/usage.js";
 import { ensureAgentWorkspace } from "../../agents/workspace.js";
@@ -68,6 +72,7 @@ import {
 import { resolveCronAgentSessionKey } from "./session-key.js";
 import { resolveCronSession } from "./session.js";
 import { resolveCronSkillsSnapshot } from "./skills-snapshot.js";
+import { isLikelyInterimCronMessage } from "./subagent-followup.js";
 
 export type RunCronAgentTurnResult = {
   /** Last non-empty agent text output (not truncated). */
@@ -454,42 +459,82 @@ export async function runCronIsolatedAgentTurn(params: {
     let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
       cronSession.sessionEntry.systemPromptReport,
     );
-    const fallbackResult = await runWithModelFallback({
-      cfg: cfgWithAgentDefaults,
-      provider,
-      model,
-      agentDir,
-      fallbacksOverride:
-        payloadFallbacks ?? resolveAgentModelFallbacksOverride(params.cfg, agentId),
-      run: async (providerOverride, modelOverride) => {
-        if (abortSignal?.aborted) {
-          throw new Error(abortReason());
-        }
-        const bootstrapPromptWarningSignature =
-          bootstrapPromptWarningSignaturesSeen[bootstrapPromptWarningSignaturesSeen.length - 1];
-        if (isCliProvider(providerOverride, cfgWithAgentDefaults)) {
-          // Fresh isolated cron sessions must not reuse a stored CLI session ID.
-          // Passing an existing ID activates the resume watchdog profile
-          // (noOutputTimeoutRatio 0.3, maxMs 180 s) instead of the fresh profile
-          // (ratio 0.8, maxMs 600 s), causing jobs to time out at roughly 1/3 of
-          // the configured timeoutSeconds. See: https://github.com/openclaw/openclaw/issues/29774
-          const cliSessionId = cronSession.isNewSession
-            ? undefined
-            : getCliSessionId(cronSession.sessionEntry, providerOverride);
-          const result = await runCliAgent({
+
+    const runPrompt = async (promptText: string) => {
+      const fallbackResult = await runWithModelFallback({
+        cfg: cfgWithAgentDefaults,
+        provider,
+        model,
+        agentDir,
+        fallbacksOverride:
+          payloadFallbacks ?? resolveAgentModelFallbacksOverride(params.cfg, agentId),
+        run: async (providerOverride, modelOverride) => {
+          if (abortSignal?.aborted) {
+            throw new Error(abortReason());
+          }
+          const bootstrapPromptWarningSignature =
+            bootstrapPromptWarningSignaturesSeen[bootstrapPromptWarningSignaturesSeen.length - 1];
+          if (isCliProvider(providerOverride, cfgWithAgentDefaults)) {
+            // Fresh isolated cron sessions must not reuse a stored CLI session ID.
+            // Passing an existing ID activates the resume watchdog profile
+            // (noOutputTimeoutRatio 0.3, maxMs 180 s) instead of the fresh profile
+            // (ratio 0.8, maxMs 600 s), causing jobs to time out at roughly 1/3 of
+            // the configured timeoutSeconds. See: https://github.com/openclaw/openclaw/issues/29774
+            const cliSessionId = cronSession.isNewSession
+              ? undefined
+              : getCliSessionId(cronSession.sessionEntry, providerOverride);
+            const result = await runCliAgent({
+              sessionId: cronSession.sessionEntry.sessionId,
+              sessionKey: agentSessionKey,
+              agentId,
+              sessionFile,
+              workspaceDir,
+              config: cfgWithAgentDefaults,
+              prompt: promptText,
+              provider: providerOverride,
+              model: modelOverride,
+              thinkLevel,
+              timeoutMs,
+              runId: cronSession.sessionEntry.sessionId,
+              cliSessionId,
+              bootstrapPromptWarningSignaturesSeen,
+              bootstrapPromptWarningSignature,
+            });
+            bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
+              result.meta?.systemPromptReport,
+            );
+            return result;
+          }
+          const result = await runEmbeddedPiAgent({
             sessionId: cronSession.sessionEntry.sessionId,
             sessionKey: agentSessionKey,
             agentId,
+            trigger: "cron",
+            messageChannel,
+            agentAccountId: resolvedDelivery.accountId,
             sessionFile,
+            agentDir,
             workspaceDir,
             config: cfgWithAgentDefaults,
-            prompt: commandBody,
+            skillsSnapshot,
+            prompt: promptText,
+            lane: params.lane ?? "cron",
             provider: providerOverride,
             model: modelOverride,
+            authProfileId,
+            authProfileIdSource,
             thinkLevel,
+            verboseLevel: resolvedVerboseLevel,
             timeoutMs,
+            bootstrapContextMode: agentPayload?.lightContext ? "lightweight" : undefined,
+            bootstrapContextRunKind: "cron",
             runId: cronSession.sessionEntry.sessionId,
-            cliSessionId,
+            // Only enforce an explicit message target when the cron delivery target
+            // was successfully resolved. When resolution fails the agent should not
+            // be blocked by a target it cannot satisfy (#27898).
+            requireExplicitMessageTarget: deliveryRequested && resolvedDelivery.ok,
+            disableMessageTool: deliveryRequested || deliveryPlan.mode === "none",
+            abortSignal,
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature,
           });
@@ -497,50 +542,55 @@ export async function runCronIsolatedAgentTurn(params: {
             result.meta?.systemPromptReport,
           );
           return result;
-        }
-        const result = await runEmbeddedPiAgent({
-          sessionId: cronSession.sessionEntry.sessionId,
-          sessionKey: agentSessionKey,
-          agentId,
-          trigger: "cron",
-          messageChannel,
-          agentAccountId: resolvedDelivery.accountId,
-          sessionFile,
-          agentDir,
-          workspaceDir,
-          config: cfgWithAgentDefaults,
-          skillsSnapshot,
-          prompt: commandBody,
-          lane: params.lane ?? "cron",
-          provider: providerOverride,
-          model: modelOverride,
-          authProfileId,
-          authProfileIdSource,
-          thinkLevel,
-          verboseLevel: resolvedVerboseLevel,
-          timeoutMs,
-          bootstrapContextMode: agentPayload?.lightContext ? "lightweight" : undefined,
-          bootstrapContextRunKind: "cron",
-          runId: cronSession.sessionEntry.sessionId,
-          // Only enforce an explicit message target when the cron delivery target
-          // was successfully resolved. When resolution fails the agent should not
-          // be blocked by a target it cannot satisfy (#27898).
-          requireExplicitMessageTarget: deliveryRequested && resolvedDelivery.ok,
-          disableMessageTool: deliveryRequested || deliveryPlan.mode === "none",
-          abortSignal,
-          bootstrapPromptWarningSignaturesSeen,
-          bootstrapPromptWarningSignature,
-        });
-        bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
-          result.meta?.systemPromptReport,
-        );
-        return result;
-      },
-    });
-    runResult = fallbackResult.result;
-    fallbackProvider = fallbackResult.provider;
-    fallbackModel = fallbackResult.model;
-    runEndedAt = Date.now();
+        },
+      });
+      runResult = fallbackResult.result;
+      fallbackProvider = fallbackResult.provider;
+      fallbackModel = fallbackResult.model;
+      provider = fallbackResult.provider;
+      model = fallbackResult.model;
+      runEndedAt = Date.now();
+    };
+
+    await runPrompt(commandBody);
+
+    // Guardrail for cron jobs: if the first turn is only an interim ack
+    // (e.g. "on it") and no descendants are active, run one focused follow-up
+    // turn so the cron run returns an actual completion.
+    if (!isAborted()) {
+      const interimPayloads = runResult.payloads ?? [];
+      const interimDeliveryPayload = pickLastDeliverablePayload(interimPayloads);
+      const interimPayloadHasStructuredContent =
+        Boolean(interimDeliveryPayload?.mediaUrl) ||
+        (interimDeliveryPayload?.mediaUrls?.length ?? 0) > 0 ||
+        Object.keys(interimDeliveryPayload?.channelData ?? {}).length > 0;
+      const interimText = pickLastNonEmptyTextFromPayloads(interimPayloads)?.trim() ?? "";
+      const hasDescendantsSinceRunStart = listDescendantRunsForRequester(agentSessionKey).some(
+        (entry) => {
+          const descendantStartedAt =
+            typeof entry.startedAt === "number" ? entry.startedAt : entry.createdAt;
+          return typeof descendantStartedAt === "number" && descendantStartedAt >= runStartedAt;
+        },
+      );
+      const shouldRetryInterimAck =
+        !runResult.meta?.error &&
+        !runResult.didSendViaMessagingTool &&
+        !interimPayloadHasStructuredContent &&
+        !interimPayloads.some((payload) => payload?.isError === true) &&
+        countActiveDescendantRuns(agentSessionKey) === 0 &&
+        !hasDescendantsSinceRunStart &&
+        isLikelyInterimCronMessage(interimText);
+
+      if (shouldRetryInterimAck) {
+        const continuationPrompt = [
+          "Your previous response was only an acknowledgement and did not complete this cron task.",
+          "Complete the original task now.",
+          "Do not send a status update like 'on it'.",
+          "Use tools when needed, including sessions_spawn for parallel subtasks, wait for spawned subagents to finish, then return only the final summary.",
+        ].join(" ");
+        await runPrompt(continuationPrompt);
+      }
+    }
   } catch (err) {
     return withRunSession({ status: "error", error: String(err) });
   }
