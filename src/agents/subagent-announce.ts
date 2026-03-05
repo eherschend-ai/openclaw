@@ -1525,17 +1525,14 @@ export async function runSubagentAnnounceFlow(params: {
       currentRunId: params.childRunId,
       signal: params.signal,
     });
-    // Cron delivery state should only be marked as delivered when we have a
-    // direct path result. Queue/steer means "accepted for later processing",
-    // not a confirmed channel send, and can otherwise produce false positives.
-    if (
-      announceType === "cron job" &&
-      (delivery.path === "queued" || delivery.path === "steered")
-    ) {
-      didAnnounce = false;
-    } else {
-      didAnnounce = delivery.delivered;
-    }
+    // Trust delivery.delivered for all paths including queue/steer.
+    // When path is "steered" or "queued", delivery.delivered=true means the
+    // message reached an active session — this is a confirmed delivery.
+    // The previous cron-specific override that forced didAnnounce=false for
+    // queue/steer was too aggressive: it suppressed valid deliveries when the
+    // fallback queue path successfully reached the user (e.g. session was busy
+    // processing at announce time, so direct failed and steer succeeded).
+    didAnnounce = delivery.delivered;
     if (!delivery.delivered && delivery.path === "direct" && delivery.error) {
       defaultRuntime.error?.(
         `Subagent completion direct announce failed for run ${params.childRunId}: ${delivery.error}`,
