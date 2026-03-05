@@ -88,7 +88,12 @@ export async function readDescendantSubagentFallbackReply(params: {
     .toSorted((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0))
     .slice(-4);
   for (const entry of latestRuns) {
-    const reply = (await readLatestAssistantReply({ sessionKey: entry.childSessionKey }))?.trim();
+    let reply = (await readLatestAssistantReply({ sessionKey: entry.childSessionKey }))?.trim();
+    // Fall back to the registry's frozen result text when the session transcript
+    // is unavailable (e.g. child session already deleted by announce cleanup).
+    if (!reply && typeof entry.frozenResultText === "string" && entry.frozenResultText.trim()) {
+      reply = entry.frozenResultText.trim();
+    }
     if (!reply || reply.toUpperCase() === SILENT_REPLY_TOKEN.toUpperCase()) {
       continue;
     }
