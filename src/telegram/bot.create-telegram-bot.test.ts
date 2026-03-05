@@ -143,6 +143,58 @@ describe("createTelegramBot", () => {
     expect(payload.Body).toContain("cmd:option_a");
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-1");
   });
+  it("does not forward AGS callback payloads into the normal agent message path", async () => {
+    createTelegramBot({ token: "tok" });
+    replySpy.mockClear();
+
+    const callbackHandler = onSpy.mock.calls.find((call) => call[0] === "callback_query")?.[1] as (
+      ctx: Record<string, unknown>,
+    ) => Promise<void>;
+    expect(callbackHandler).toBeDefined();
+
+    await callbackHandler({
+      callbackQuery: {
+        id: "cbq-ags-1",
+        data: "ags|J|A|abcdef12",
+        from: { id: 9, first_name: "Ada", username: "ada_bot" },
+        message: {
+          chat: { id: -100200300, type: "supergroup", is_forum: true, title: "Ops" },
+          date: 1736380800,
+          message_id: 16,
+          message_thread_id: 34,
+        },
+      },
+      me: { username: "openclaw_bot" },
+      getFile: async () => ({ download: async () => new Uint8Array() }),
+    });
+
+    expect(replySpy).not.toHaveBeenCalled();
+    expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-ags-1");
+  });
+  it("does not forward AGS text payloads from message flow into the normal agent path", async () => {
+    createTelegramBot({ token: "tok" });
+    replySpy.mockClear();
+
+    const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
+    await handler({
+      message: {
+        chat: { id: -100200300, type: "supergroup", is_forum: true, title: "Ops" },
+        text: "ags|J|A|abcdef12",
+        date: 1736380800,
+        message_id: 17,
+        message_thread_id: 34,
+        from: {
+          id: 9,
+          first_name: "Ada",
+          username: "ada_bot",
+        },
+      },
+      me: { username: "openclaw_bot" },
+      getFile: async () => ({ download: async () => new Uint8Array() }),
+    });
+
+    expect(replySpy).not.toHaveBeenCalled();
+  });
   it("wraps inbound message with Telegram envelope", async () => {
     await withEnvAsync({ TZ: "Europe/Vienna" }, async () => {
       createTelegramBot({ token: "tok" });

@@ -1,4 +1,12 @@
 import type { Message, ReactionTypeEmoji } from "@grammyjs/types";
+import type { DmPolicy } from "../config/types.base.js";
+import type {
+  TelegramDirectConfig,
+  TelegramGroupConfig,
+  TelegramTopicConfig,
+} from "../config/types.js";
+import type { TelegramMediaRef } from "./bot-message-context.js";
+import type { TelegramContext } from "./bot/types.js";
 import { resolveAgentDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import {
   createInboundDebouncer,
@@ -17,12 +25,6 @@ import { resolveChannelConfigWrites } from "../channels/plugins/config-writes.js
 import { loadConfig } from "../config/config.js";
 import { writeConfigFile } from "../config/io.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
-import type { DmPolicy } from "../config/types.base.js";
-import type {
-  TelegramDirectConfig,
-  TelegramGroupConfig,
-  TelegramTopicConfig,
-} from "../config/types.js";
 import { danger, logVerbose, warn } from "../globals.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { MediaFetchError } from "../media/fetch.js";
@@ -35,7 +37,6 @@ import {
   normalizeDmAllowFromWithStore,
   type NormalizedAllowFrom,
 } from "./bot-access.js";
-import type { TelegramMediaRef } from "./bot-message-context.js";
 import { RegisterTelegramHandlerParams } from "./bot-native-commands.js";
 import {
   MEDIA_GROUP_TIMEOUT_MS,
@@ -49,7 +50,6 @@ import {
   resolveTelegramForumThreadId,
   resolveTelegramGroupAllowFromContext,
 } from "./bot/helpers.js";
-import type { TelegramContext } from "./bot/types.js";
 import { enforceTelegramDmAccess } from "./dm-access.js";
 import {
   evaluateTelegramGroupBaseAccess,
@@ -121,6 +121,15 @@ export const registerTelegramHandlers = ({
   logger,
 }: RegisterTelegramHandlerParams) => {
   const DEFAULT_TEXT_FRAGMENT_MAX_GAP_MS = 1500;
+  const AGS_CALLBACK_RE = /^ags\|([LJ])\|([A-Z])\|([a-f0-9]{8,16})$/i;
+  const AGS_DIRECT_TIMEOUT_MS = Math.max(
+    5_000,
+    Number(process.env.AGS_DIRECT_CALLBACK_TIMEOUT_MS || 120_000),
+  );
+  const AGS_DIRECT_RUNNER_BY_LANE: Record<string, string[]> = {
+    L: ["bash", "/Users/erikherschend/clawd/memory/cron-state/ags-lead-alert-run.sh"],
+    J: ["bash", "/Users/erikherschend/clawd/memory/cron-state/ags-reply-alert-run.sh"],
+  };
   const TELEGRAM_TEXT_FRAGMENT_START_THRESHOLD_CHARS = 4000;
   const TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS =
     typeof opts.testTimings?.textFragmentGapMs === "number" &&
@@ -867,6 +876,18 @@ export const registerTelegramHandlers = ({
     // Text fragment handling - Telegram splits long pastes into multiple inbound messages (~4096 chars).
     // We buffer “near-limit” messages and append immediately-following parts.
     const text = typeof msg.text === "string" ? msg.text : undefined;
+    const trimmedText = (text ?? "").trim();
+    if (
+      trimmedText &&
+      dispatchAgsDirectMessage({
+        data: trimmedText,
+        chatId,
+        messageId: msg.message_id,
+        messageThreadId: dmThreadId ?? resolvedThreadId,
+      })
+    ) {
+      return;
+    }
     const isCommandLike = (text ?? "").trim().startsWith("/");
     if (text && !isCommandLike) {
       const nowMs = Date.now();
@@ -1027,6 +1048,74 @@ export const registerTelegramHandlers = ({
       debounceLane,
       botUsername: ctx.me?.username,
     });
+  };
+
+  const buildAgsDirectDispatchEnv = (params: {
+    data: string;
+    callbackId?: string;
+    chatId: string | number;
+    callbackMessage: {
+      message_id?: number;
+      message_thread_id?: number;
+    };
+  }) => {
+    const directMessageId = String(params.callbackMessage.message_id ?? params.callbackId ?? "");
+    const directTopicId =
+      params.callbackMessage.message_thread_id != null
+        ? String(params.callbackMessage.message_thread_id)
+        : "";
+    return {
+      CALLBACK_ONLY: "1",
+      JOBERT_CALLBACK_ONLY: "1",
+      AGS_DIRECT_CALLBACK: params.data,
+      AGS_DIRECT_MESSAGE_ID: directMessageId,
+      AGS_DIRECT_TS_MS: String(Date.now()),
+      AGS_DIRECT_CHAT_ID: String(params.chatId),
+      AGS_DIRECT_TOPIC_ID: directTopicId,
+    };
+  };
+
+  const dispatchAgsDirectMessage = (params: {
+    data: string;
+    chatId: string | number;
+    messageId?: string | number;
+    messageThreadId?: number;
+  }) => {
+    const agsMatch = params.data.match(AGS_CALLBACK_RE);
+    if (!agsMatch) {
+      return false;
+    }
+    const lane = String(agsMatch[1] || "").toUpperCase();
+    const runnerArgv = AGS_DIRECT_RUNNER_BY_LANE[lane];
+    if (!runnerArgv?.length) {
+      return false;
+    }
+
+    void runCommandWithTimeout(runnerArgv, {
+      timeoutMs: AGS_DIRECT_TIMEOUT_MS,
+      env: buildAgsDirectDispatchEnv({
+        data: params.data,
+        chatId: params.chatId,
+        callbackMessage: {
+          message_id: params.messageId != null ? Number(params.messageId) : undefined,
+          message_thread_id: params.messageThreadId,
+        },
+      }),
+    })
+      .then((res) => {
+        if (res.code === 0) {
+          return;
+        }
+        const stderr = String(res.stderr || "").trim();
+        const stdout = String(res.stdout || "").trim();
+        const details = stderr || stdout || `exit_code=${String(res.code ?? "unknown")}`;
+        runtime.error?.(danger(`ags direct callback failed (${params.data}): ${details}`));
+      })
+      .catch((err) => {
+        runtime.error?.(danger(`ags direct callback error (${params.data}): ${String(err)}`));
+      });
+
+    return true;
   };
   bot.on("callback_query", async (ctx) => {
     const callback = ctx.callbackQuery;
@@ -1297,6 +1386,17 @@ export const registerTelegramHandlers = ({
           return;
         }
 
+        return;
+      }
+
+      const agsMatch = data.match(AGS_CALLBACK_RE);
+      if (agsMatch) {
+        dispatchAgsDirectMessage({
+          data,
+          chatId,
+          messageId: callbackMessage.message_id,
+          messageThreadId: (callbackMessage as { message_thread_id?: number }).message_thread_id,
+        });
         return;
       }
 
