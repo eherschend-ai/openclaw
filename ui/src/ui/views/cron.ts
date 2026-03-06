@@ -1597,6 +1597,12 @@ function renderJobPayload(job: CronJob) {
       <span class="muted cron-job-detail-value">${job.payload.text}</span>
     </div>`;
   }
+  if (job.payload.kind === "execCommand") {
+    return html`<div class="cron-job-detail">
+      <span class="cron-job-detail-label">${t("cron.jobDetail.prompt")}</span>
+      <span class="muted cron-job-detail-value">${job.payload.command}</span>
+    </div>`;
+  }
 
   const delivery = job.delivery;
   const deliveryTarget =

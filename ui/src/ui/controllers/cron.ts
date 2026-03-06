@@ -449,8 +449,13 @@ function jobToForm(job: CronJob, prev: CronFormState): CronFormState {
     staggerUnit: "seconds",
     sessionTarget: job.sessionTarget,
     wakeMode: job.wakeMode,
-    payloadKind: job.payload.kind,
-    payloadText: job.payload.kind === "systemEvent" ? job.payload.text : job.payload.message,
+    payloadKind: job.payload.kind === "systemEvent" ? "systemEvent" : "agentTurn",
+    payloadText:
+      job.payload.kind === "systemEvent"
+        ? job.payload.text
+        : job.payload.kind === "execCommand"
+          ? job.payload.command
+          : job.payload.message,
     payloadModel: job.payload.kind === "agentTurn" ? (job.payload.model ?? "") : "",
     payloadThinking: job.payload.kind === "agentTurn" ? (job.payload.thinking ?? "") : "",
     payloadLightContext:

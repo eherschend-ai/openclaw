@@ -456,6 +456,13 @@ export type CronPayload =
       thinking?: string;
       timeoutSeconds?: number;
       lightContext?: boolean;
+    }
+  | {
+      kind: "execCommand";
+      command: string;
+      args?: string[];
+      cwd?: string;
+      timeoutSeconds?: number;
     };
 
 export type CronDelivery = {

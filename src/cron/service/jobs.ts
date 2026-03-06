@@ -134,8 +134,12 @@ export function assertSupportedJobSpec(job: Pick<CronJob, "sessionTarget" | "pay
   if (job.sessionTarget === "main" && job.payload.kind !== "systemEvent") {
     throw new Error('main cron jobs require payload.kind="systemEvent"');
   }
-  if (job.sessionTarget === "isolated" && job.payload.kind !== "agentTurn") {
-    throw new Error('isolated cron jobs require payload.kind="agentTurn"');
+  if (
+    job.sessionTarget === "isolated" &&
+    job.payload.kind !== "agentTurn" &&
+    job.payload.kind !== "execCommand"
+  ) {
+    throw new Error('isolated cron jobs require payload.kind="agentTurn" or "execCommand"');
   }
 }
 
@@ -744,6 +748,19 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
       throw new Error('cron.update payload.kind="systemEvent" requires text');
     }
     return { kind: "systemEvent", text: patch.text };
+  }
+
+  if (patch.kind === "execCommand") {
+    if (typeof patch.command !== "string" || patch.command.length === 0) {
+      throw new Error('cron.update payload.kind="execCommand" requires command');
+    }
+    return {
+      kind: "execCommand",
+      command: patch.command,
+      args: patch.args,
+      cwd: patch.cwd,
+      timeoutSeconds: patch.timeoutSeconds,
+    };
   }
 
   if (typeof patch.message !== "string" || patch.message.length === 0) {

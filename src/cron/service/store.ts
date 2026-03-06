@@ -83,6 +83,10 @@ function normalizePayloadKind(payload: Record<string, unknown>) {
     payload.kind = "agentTurn";
     return true;
   }
+  if (raw === "execcommand") {
+    payload.kind = "execCommand";
+    return true;
+  }
   if (raw === "systemevent") {
     payload.kind = "systemEvent";
     return true;
@@ -98,12 +102,12 @@ function inferPayloadIfMissing(raw: Record<string, unknown>) {
     raw.payload = { kind: "agentTurn", message };
     return true;
   }
-  if (text) {
-    raw.payload = { kind: "systemEvent", text };
+  if (command) {
+    raw.payload = { kind: "execCommand", command };
     return true;
   }
-  if (command) {
-    raw.payload = { kind: "systemEvent", text: command };
+  if (text) {
+    raw.payload = { kind: "systemEvent", text };
     return true;
   }
   return false;

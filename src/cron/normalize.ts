@@ -91,6 +91,8 @@ function coercePayload(payload: UnknownRecord) {
   const kindRaw = typeof next.kind === "string" ? next.kind.trim().toLowerCase() : "";
   if (kindRaw === "agentturn") {
     next.kind = "agentTurn";
+  } else if (kindRaw === "execcommand") {
+    next.kind = "execCommand";
   } else if (kindRaw === "systemevent") {
     next.kind = "systemEvent";
   } else if (kindRaw) {
@@ -99,6 +101,7 @@ function coercePayload(payload: UnknownRecord) {
   if (!next.kind) {
     const hasMessage = typeof next.message === "string" && next.message.trim().length > 0;
     const hasText = typeof next.text === "string" && next.text.trim().length > 0;
+    const hasCommand = typeof next.command === "string" && next.command.trim().length > 0;
     const hasAgentTurnHint =
       typeof next.model === "string" ||
       typeof next.thinking === "string" ||
@@ -106,6 +109,8 @@ function coercePayload(payload: UnknownRecord) {
       typeof next.allowUnsafeExternalContent === "boolean";
     if (hasMessage) {
       next.kind = "agentTurn";
+    } else if (hasCommand) {
+      next.kind = "execCommand";
     } else if (hasText) {
       next.kind = "systemEvent";
     } else if (hasAgentTurnHint) {
@@ -123,6 +128,34 @@ function coercePayload(payload: UnknownRecord) {
     const trimmed = next.text.trim();
     if (trimmed) {
       next.text = trimmed;
+    }
+  }
+  if (typeof next.command === "string") {
+    const trimmed = next.command.trim();
+    if (trimmed) {
+      next.command = trimmed;
+    }
+  }
+  if ("args" in next) {
+    if (Array.isArray(next.args)) {
+      next.args = next.args
+        .filter((entry) => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+    } else {
+      delete next.args;
+    }
+  }
+  if ("cwd" in next) {
+    if (typeof next.cwd === "string") {
+      const trimmed = next.cwd.trim();
+      if (trimmed) {
+        next.cwd = trimmed;
+      } else {
+        delete next.cwd;
+      }
+    } else {
+      delete next.cwd;
     }
   }
   if ("model" in next) {
@@ -385,8 +418,11 @@ export function normalizeCronJobInput(
   if (!("payload" in next) || !isRecord(next.payload)) {
     const message = typeof next.message === "string" ? next.message.trim() : "";
     const text = typeof next.text === "string" ? next.text.trim() : "";
+    const command = typeof next.command === "string" ? next.command.trim() : "";
     if (message) {
       next.payload = { kind: "agentTurn", message };
+    } else if (command) {
+      next.payload = { kind: "execCommand", command };
     } else if (text) {
       next.payload = { kind: "systemEvent", text };
     }
@@ -435,10 +471,10 @@ export function normalizeCronJobInput(
     }
     if (!next.sessionTarget && isRecord(next.payload)) {
       const kind = typeof next.payload.kind === "string" ? next.payload.kind : "";
-      if (kind === "systemEvent") {
-        next.sessionTarget = "main";
-      }
-      if (kind === "agentTurn") {
+    if (kind === "systemEvent") {
+      next.sessionTarget = "main";
+    }
+      if (kind === "agentTurn" || kind === "execCommand") {
         next.sessionTarget = "isolated";
       }
     }

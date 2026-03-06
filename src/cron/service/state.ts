@@ -70,7 +70,7 @@ export type CronServiceDeps = {
   wakeNowHeartbeatBusyRetryDelayMs?: number;
   runIsolatedAgentJob: (params: {
     job: CronJob;
-    message: string;
+    message?: string;
     abortSignal?: AbortSignal;
   }) => Promise<
     {

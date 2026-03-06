@@ -191,6 +191,21 @@ describe("applyJobPatch", () => {
     }
   });
 
+  it("accepts isolated execCommand payloads", () => {
+    const now = Date.now();
+    const job = createIsolatedAgentTurnJob("job-exec-command", { mode: "none" }, {
+      createdAtMs: now,
+      updatedAtMs: now,
+      payload: { kind: "execCommand", command: "/tmp/test-command.sh" },
+    });
+
+    expect(() => applyJobPatch(job, { payload: { kind: "execCommand", command: "/tmp/test-command.sh" } })).not.toThrow();
+    expect(job.payload.kind).toBe("execCommand");
+    if (job.payload.kind === "execCommand") {
+      expect(job.payload.command).toBe("/tmp/test-command.sh");
+    }
+  });
+
   it("rejects webhook delivery without a valid http(s) target URL", () => {
     const expectedError = "cron webhook delivery requires delivery.to to be a valid http(s) URL";
     const cases = [
